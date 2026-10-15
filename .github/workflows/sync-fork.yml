@@ -1,14 +1,17 @@
 name: Sync fork from upstream (safe)
 
 # 云端自动同步: 即使 Mac 关机也能让 Fork 跟上原作者更新。
-# 策略: 仅快进(no force-push), 若上游改写历史(non-ff)则安全跳过, 绝不覆盖已有提交。
+# 策略: 绝不 force-push。按祖先关系四情况处理:
+#   identical / ahead-only -> 已最新, 不动
+#   behind                 -> 快进 (ff-only)
+#   diverged               -> 安全合并 (merge, 保留双方历史); 冲突则失败停止, Fork 保持原样
 on:
   schedule:
     - cron: '0 */6 * * *'   # 每 6 小时
   workflow_dispatch:
 
 permissions:
-  contents: write   # 允许推送到本 Fork(仅推自己的 main, 不碰上游)
+  contents: write   # 允许推送到本 Fork(只推自己的 main, 不碰上游)
 
 jobs:
   sync:
@@ -27,33 +30,30 @@ jobs:
           git fetch upstream
           git fetch origin
 
-      - name: Fast-forward to upstream (no force push)
-        id: syncstep
+      - name: Reconcile with upstream (safe, no force push)
         run: |
+          set -e
           UP=$(git rev-parse upstream/main)
           LOCAL=$(git rev-parse HEAD)
           echo "local=$LOCAL upstream=$UP"
           if [ "$UP" = "$LOCAL" ]; then
-            echo "no change"; echo "status=unchanged" >> "$GITHUB_OUTPUT"; exit 0
+            echo "STATUS=identical"; exit 0
           fi
-          # 仅当本地是上游祖先(线性可快进)才更新; 否则安全停止
-          if git merge-base --is-ancestor HEAD upstream/main; then
+          # 上游是本地祖先 -> 本地已含上游全部, 无需拉取
+          if git merge-base --is-ancestor "$UP" "$LOCAL" >/dev/null 2>&1; then
+            echo "STATUS=ahead_only"; exit 0
+          fi
+          # 本地是上游祖先 -> 快进
+          if git merge-base --is-ancestor "$LOCAL" "$UP" >/dev/null 2>&1; then
             git merge --ff-only upstream/main
-            echo "status=merged" >> "$GITHUB_OUTPUT"
-            echo "merged_to=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          else
-            echo "DIVERGED: upstream rewrote history. Skipping (no force push)."
-            echo "status=diverged" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "STATUS=merged_ff"; exit 0
           fi
+          # 双方分歧 -> 安全合并 (非强制); 冲突让 git 失败退出 -> 流程停止, Fork 原样保留
+          git merge --no-edit upstream/main
+          echo "STATUS=merged"
 
-      - name: Push to fork (fast-forward only, no force)
+      - name: Push to fork (fast-forward or merge commit, never force)
         run: |
-          # 仅当上一步发生了合并才推送
-          gh_status="${{ steps.syncstep.outputs.status }}"
-          if [ "$gh_status" = "merged" ]; then
-            git push origin main
-            echo "Pushed fork main to $(git rev-parse HEAD)"
-          else
-            echo "No push performed (unchanged or diverged — fork left intact)"
-          fi
+          # 仅当确实产生了新提交才推送
+          git diff --quiet origin/main || git push origin main
+          echo "Fork main now at $(git rev-parse HEAD)"
