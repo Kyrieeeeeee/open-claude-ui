@@ -30,6 +30,11 @@ jobs:
           git fetch upstream
           git fetch origin
 
+      - name: Set git identity (needed for merge commits on diverged)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Reconcile with upstream (safe, no force push)
         run: |
           set -e
